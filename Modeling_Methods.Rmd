@@ -1,0 +1,332 @@
+---
+title: "Descriptives_Render"
+author: "Anissa Hyde"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Packages
+```{r message=FALSE, warning=FALSE}
+library(glmmTMB)
+library(readr)
+library(dplyr)
+library(gtsummary)
+library(sjPlot)
+library(performance)
+library(DHARMa)
+library(tidyr)
+library(ggeffects)
+library(scales)
+```
+
+```{r message=FALSE, warning=FALSE}
+period_inputv6 <- read_csv("period_inputv6.csv", 
+    col_types = cols(...1 = col_skip()))
+```
+
+```{r include=FALSE}
+period_inputv6$County<-as.character(period_inputv6$County)
+period_inputv6$Commuting.Zone<-as.character(period_inputv6$Commuting.Zone)
+period_inputv6$Density<-as.factor(period_inputv6$Density)
+period_inputv6$Built<-as.factor(period_inputv6$Built)
+period_inputv6$Built<-relevel(period_inputv6$Built,ref = "Before 1950")
+period_inputv6$Density<-relevel(period_inputv6$Density, ref = "Moderate and High Density(Suburban and Urban)")
+
+stats <- c(
+  "Mean (SD)" = "{mean} ({sd})",
+  "Median (IQR)" = "{median} ({IQR})"
+)
+period_inputv6$Shoreline<-as.factor(period_inputv6$Shoreline)
+```
+
+# Table 2: Gulf Wide Descriptive for Gulf Wide Coverage Model
+```{r}
+theme_gtsummary_compact()
+
+global<- purrr::imap(
+  stats,
+  ~period_inputv6 %>%
+    tbl_summary(
+      include =  c("Claims",
+                   "Coverage",
+                   "Income",
+                   "Black",
+                   "Hispanic",
+                   "Renters",
+                   "SFHA",
+                   "Risk.Diff",
+                   "Built",
+                   "Density",
+                   "Shoreline"),
+       label =  c(Claims ~ "Response: Claims", 
+                 Coverage ~ "Vulnerability: Insurance Coverage",
+                 Black ~ "Vulnerability: % Black Population", 
+                 Hispanic ~ "Vulnerability : % Hispanic Population", 
+                 Income ~ "Vunerability: Median Household Income",
+                 Renters ~ "Vulnerability: % Renter Occupied",
+                 SFHA ~ "Risk: SFHA", 
+                 Risk.Diff ~ "Risk: Risk Difference",
+                Density ~ "Urban Form: Density Category",
+                Shoreline ~ "Shoreline County",
+                Built ~ "Urban Form: Median House Age"),
+      statistic = list(all_continuous() ~ .x),
+      missing = "no") %>%
+     modify_header(all_stat_cols() ~ stringr::str_glue("**{.y}**"))
+) %>%
+  tbl_merge(tab_spanner = FALSE) %>%
+  modify_footnote(all_stat_cols() ~ NA) %>%
+     modify_caption("**Table 2. Gulf Wide Characteristics**") %>%
+  bold_labels()
+
+global
+```
+# Gulf Wide Coverage Model 
+```{r warning=FALSE}
+g.coverage <-glmmTMB(Coverage ~ Density +
+                                scale(Income) + 
+                                scale(Black) + 
+                                scale(Hispanic) + 
+                                scale(Renters) +
+                                #scale(Flood.Factor) +
+                                scale(SFHA) +
+                                scale(Risk.Diff)+
+                                Built +
+                                Shoreline +
+                                T +
+                              (1 |Commuting.Zone:County),
+                                dispformula = ~1 ,
+                                ziformula = ~1,
+                                data = period_inputv6,
+                              family = ziGamma(link = "log"),
+                     control=glmmTMBControl(optCtrl=list(iter.max=1e6,
+                                                         eval.max=1e6)))
+```
+
+```{r}
+par(mar=c(2,2,2,2))
+gresids<-simulateResiduals(g.coverage, n=3000)
+plot(gresids)
+
+```
+
+```{r}
+plot_model(g.coverage)
+```
+
+Gulf Wide Insurance Claims
+
+Notes. Details like labels will come soon
+
+```{r}
+g.claims <-glmmTMB(Claims ~ Density +
+                       scale(Income) + 
+                       scale(Black) + 
+                       scale(Hispanic) + 
+                       scale(Renters) +
+                       #scale(Flood.Factor) +
+                       scale(SFHA) +
+                      scale(Risk.Diff) +
+                       Built +
+                      Coverage +
+                       Shoreline +
+                       T +
+                       (1 |Commuting.Zone:County),
+                       # (1 | Time.Period),
+                     # ziformula = ~1,
+                      data = period_inputv6, 
+                      family = nbinom2(link = "log"),
+                     control=glmmTMBControl(optCtrl=list(iter.max=1e6,
+                                                         eval.max=1e6)))
+```
+
+
+```{r}
+par(mar=c(2,2,2,2))
+gresids<-simulateResiduals(g.claims, n=3000)
+plot(gresids)
+
+```
+
+
+
+#Extract Exposed Counties
+
+To identify the most exposed counties in our study area we are going to extract our geographical random effect estimates to see which county has the most influence on exposure
+
+```{r}
+
+random<-ranef(g.claims) #Extract the random effect information
+
+random<-as.data.frame(random) # Necessary
+
+claims.ranef<-random %>%
+  dplyr::select(grp, condval) %>%
+  dplyr:: rename("claim_estimate" = "condval") %>%
+  separate(grp,into  = c( "Commuting.Zone","County"), sep = ":")%>%
+  na.omit()
+```
+Join them to the Gulf Wide set to capture covariates
+```{r}
+
+period_inputv7<-left_join(period_inputv6,claims.ranef,by  = c("Commuting.Zone","County"))
+
+e.claim<-period_inputv7 %>% filter(claim_estimate >= 0.71) # Third quartile
+```
+# Exposed County Descriptives 
+```{r}
+theme_gtsummary_compact()
+
+exposed<- purrr::imap(
+  stats,
+  ~e.claim %>%
+    tbl_summary(
+      include =  c("Claims", "Coverage","Income","Black","Hispanic","Renters","SFHA","Flood.Factor","Risk.Diff","Density","Built", "Shoreline"),
+      statistic = list(all_continuous() ~ .x),
+      missing = "no",
+      label =  c(Claims ~ "Response: Claims", 
+                 Coverage ~ "Vulnerability: Insurance Coverage",
+                 Black ~ "Vulnerability: % Black Population", 
+                 Hispanic ~ "Vulnerability : % Hispanic Population", 
+                 Income ~ "Vunerability: Median Household Income",
+                 Renters ~ "Vulnerability: % Renter Occupied",
+                 SFHA ~ "Risk: SFHA", 
+                 Flood.Factor ~ "Risk: % Moderate - Severe Flood Factor Score",
+                 Risk.Diff ~ "Risk: Flood Factor -  SFHA",
+                  Density ~ "Urban Form: Density Category",
+                 Built ~ "Urban Form: Median House Age",
+                 Shoreline ~ "Shoreline County")) %>%
+     modify_header(all_stat_cols() ~ stringr::str_glue("**{.y}**"))
+) %>%
+  tbl_merge(tab_spanner = FALSE) %>%
+  modify_footnote(all_stat_cols() ~ NA) %>%
+  bold_labels()
+
+tbl_merge(tbls=list(global,exposed), tab_spanner = c("Global", "Exposed")) %>%
+  modify_caption("**Table 1. Descriptives**") %>% 
+  bold_labels()
+```
+
+```{r}
+hist(e.claim$Claims)
+```
+
+# Exposed Models
+
+Coverage 
+```{r}
+e.coverage <-glmmTMB(Coverage  ~ Density +
+                                scale(Income) + 
+                                scale(Black) + 
+                                scale(Hispanic) + 
+                                scale(Renters) +
+                                #scale(Flood.Factor) +
+                                scale(SFHA) +
+                                scale(Risk.Diff)+
+                                Built +
+                                #scale(Coverage)+
+                                Shoreline +
+                                T +
+                                (1 |County),
+                                ziformula = ~1, 
+                                dispformula = ~1 ,
+                                data = e.claim,
+                              family = ziGamma(link = "log"),
+                     control=glmmTMBControl(optCtrl=list(iter.max=1e6,
+                                                         eval.max=1e6)))
+```
+Claims
+```{r}
+e.claims <-glmmTMB(Claims ~ Density +
+                       scale(Income) + 
+                       scale(Black) + 
+                       scale(Hispanic) + 
+                       scale(Renters) +
+                       #scale(Flood.Factor) +
+                       scale(SFHA) +
+                       scale(Risk.Diff) +
+                       Built +
+                       Coverage+
+                       Shoreline +
+                       T +
+                       (1 |County),
+                       # (1 | Time.Period),
+                     # ziformula = ~1,
+                      data = e.claim, 
+                      family = nbinom2(link = "log"),
+                     control=glmmTMBControl(optCtrl=list(iter.max=1e6,
+                                                         eval.max=1e6)))
+```
+# Regression Tables
+```{r}
+Claims<- tab_model(g.coverage,g.claims,e.coverage,e.claims,show.intercept = TRUE,
+                      show.icc = TRUE, 
+                      show.aic = TRUE,
+                      show.p = FALSE,
+                      show.zeroinf = FALSE,
+                      p.style = "scientific_stars",
+                      dv.labels = c("Gulf Coverage","Gulf Claims ","Exposed Coverage","Exposed Claims"),
+                      order.terms = c(7,8,3,6,4,5,1,2,11,9,10,12,13))
+
+Claims
+
+```
+
+#Plot Models 
+
+
+Plot 1: Coverage Estimates Gulf Wide and Exposed
+
+```{r}
+plot_models(g.coverage,e.coverage,
+            m.labels = c("Gulf Wide Coverage", "Exposed County Coverage"),
+         axis.labels = c(
+   "Time Period", "Shoreline","Homes Built After 1989", "Homes Built between 1970-1989","Homes Built Between 1950-1969","Risk Difference","SFHA","Renters","Hispanic","Black","Median Income","Rural Area","Suburban and Urban Areas"),
+  show.values = FALSE, 
+  show.p = FALSE, 
+  p.shape = TRUE
+)
+```
+
+Plot 2: Claims Estimates Gulf Wide and Exposed
+
+```{r}
+plot_models(g.claims,e.claims,
+            m.labels = c("Gulf Wide Claims", "Exposed County Claims"),
+         axis.labels = c(
+   "Time Period", "Shoreline","Homes Built After 1989", "Homes Built between 1970-1989","Homes Built Between 1950-1969","Risk Difference","SFHA","Renters","Hispanic","Black","Median Income","Rural Area","Suburban and Urban Areas", "Insurance Coverage"),
+  show.values = FALSE, 
+  show.p = FALSE, 
+  p.shape = TRUE
+)
+```
+
+Plot 3: Random Effects 
+
+```{r}
+plot_model(e.claims, type = "re") 
+# Here I want to use the county names. Adding it to my to do
+```
+
+plot 3: Trying out Predicted Plots
+
+example here
+```{r}
+plot_model(e.coverage,type = "pred",terms =c("Black","T") )
+```
+
+another example
+Note to adjust labels 
+```{r}
+plot_model(e.claims,type = "pred",terms =c("scale_coverage","Density") )
+```
+
+another example
+```{r}
+plot_model(e.claims,type = "pred",terms =c("Income","Density","SFHA") )
+```
+
